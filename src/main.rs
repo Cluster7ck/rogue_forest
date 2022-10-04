@@ -21,32 +21,92 @@ use tui::{
     Frame, Terminal,
 };
 
-const WIDTH: usize = 8;
-const HEIGHT: usize = 8;
+const WIDTH: usize = 6;
+const HEIGHT: usize = 6;
 
 enum State {
-    Choosing(usize),
-    Placing,
+    Choosing(ChoosingState),
+    Placing(PlacingState),
 }
 
-struct Board {
+#[derive(Debug, Clone, Copy)]
+struct ChoosingState {
+    index: usize,
+    choice: [Plant; 3],
+}
+
+impl ChoosingState {
+    fn index(self, index: usize) -> ChoosingState {
+        ChoosingState { index, ..self }
+    }
+}
+
+impl Default for ChoosingState {
+    fn default() -> Self {
+        Self { index: Default::default(), choice: START_PLANTS }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlacingState {
+    x: usize,
+    y: usize,
+}
+
+impl PlacingState {
+    fn onUp(&mut self) {
+        self.y = (self.y + 1).clamp(0, HEIGHT - 1);
+    }
+
+    fn onDown(&mut self) {
+        self.y = (self.y - 1).clamp(0, HEIGHT - 1);
+    }
+
+    fn onRight(&mut self) {
+        self.x = (self.x + 1).clamp(0, WIDTH - 1);
+    }
+
+    fn onLeft(&mut self) {
+        self.x = (self.x - 1).clamp(0, WIDTH - 1);
+    }
+
+    fn onSpace(self, game: &mut Game) {
+        if let Tile::Thing(plant) = game.next {
+            game.place_plant(self.x as usize, self.y as usize, plant);
+            game.update_game((self.x as usize, self.y as usize));
+            game.state = State::Choosing(ChoosingState::default());
+        }
+    }
+}
+
+impl Default for PlacingState {
+    fn default() -> Self {
+        Self { x: (WIDTH as f64 / 2.0).round() as usize, y: (HEIGHT as f64 / 2.0).round() as usize }
+    }
+}
+
+struct Game {
+    state: State,
     tile: Vec<Tile>,
+    available: Vec<Plant>,
     points: u32,
     round: u32,
     next: Tile,
 }
 
-impl Board {
-    fn empty() -> Board {
-        Board {
+impl Game {
+    fn empty() -> Game {
+        Game {
+            state: State::Choosing(ChoosingState::default()),
             tile: (0..(WIDTH * HEIGHT))
                 .map(|_| {
                     Tile::Empty
                 })
                 .collect::<Vec<Tile>>(),
+            available: START_PLANTS.into_iter().collect(),
             points: 0,
             round: 0,
-            next: Tile::Thing(PLANTS[0]),
+            next: Tile::Thing(START_PLANTS[0]),
         }
     }
 
@@ -54,7 +114,7 @@ impl Board {
         self.tile[xy_idx(x, y)] = Tile::Thing(plant);
     }
 
-    fn update_board(&mut self, (new_x, new_y): (usize, usize)) {
+    fn update_game(&mut self, (new_x, new_y): (usize, usize)) {
         for y in 0..HEIGHT {
             for x in 0..WIDTH {
                 if x == new_x && y == new_y {
@@ -70,13 +130,27 @@ impl Board {
                 }
             }
         }
+        if self.round == 10 {
+            self.available.push(Plant {
+                max_age: 10,
+                age: 0,
+                points: 10,
+                display: 'o',
+            });
+        } else if self.round == 15 {
+            self.available.push(Plant {
+                max_age: 20,
+                age: 0,
+                points: 40,
+                display: 'T',
+            });
+        }
         self.round += 1;
     }
 }
 
 struct App {
-    board: Board,
-    state: State,
+    game: Game,
     x: f64,
     y: f64,
 }
@@ -84,8 +158,7 @@ struct App {
 impl App {
     fn new() -> App {
         App {
-            board: Board::empty(),
-            state: State::Choosing(0),
+            game: Game::empty(),
             x: WIDTH as f64 / 2.0,
             y: HEIGHT as f64 / 2.0,
         }
@@ -107,6 +180,27 @@ impl Display for Plant {
     }
 }
 
+const START_PLANTS: [Plant; 3] = [
+    Plant {
+        max_age: 1,
+        age: 0,
+        points: 0,
+        display: 'w',
+    },
+    Plant {
+        max_age: 4,
+        age: 0,
+        points: 2,
+        display: 'F',
+    },
+    Plant {
+        max_age: 7,
+        age: 0,
+        points: 4,
+        display: 'Y',
+    },
+];
+
 enum Tile {
     Empty,
     Thing(Plant),
@@ -125,57 +219,32 @@ fn xy_idx(x: usize, y: usize) -> usize {
     y * WIDTH + x
 }
 
-const PLANTS: [Plant; 3] = [
-    Plant {
-        max_age: 4,
-        age: 0,
-        points: 2,
-        display: 'F',
-    },
-    Plant {
-        max_age: 10,
-        age: 0,
-        points: 10,
-        display: 'o',
-    },
-    Plant {
-        max_age: 20,
-        age: 0,
-        points: 40,
-        display: 'T',
-    },
-];
-
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
 
         if let Event::Key(key) = event::read()? {
-            match app.state {
-                State::Choosing(index) => match key.code {
+            match app.game.state {
+                State::Choosing(state) => match key.code {
                     KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Right => app.state = State::Choosing((index + 1).clamp(0, 2)),
+                    KeyCode::Right => app.game.state = State::Choosing(state.index((state.index + 1).clamp(0, 2))),
                     KeyCode::Left => {
-                        app.state = State::Choosing((index as i32 - 1).clamp(0, 2) as usize)
+                        app.game.state = State::Choosing(state.index((state.index as i32 - 1).clamp(0, 2) as usize))
                     }
                     KeyCode::Char(' ') => {
-                        app.board.next = Tile::Thing(PLANTS[index]);
-                        app.state = State::Placing;
+                        app.game.next = Tile::Thing(START_PLANTS[state.index]);
+                        app.game.state = State::Placing(PlacingState::default());
                     }
                     _ => {}
                 },
-                State::Placing => match key.code {
+                State::Placing(mut state) => match key.code {
                     KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Up => app.y = (app.y + 1.0).clamp(0.0, HEIGHT as f64 - 1.0),
-                    KeyCode::Down => app.y = (app.y - 1.0).clamp(0.0, HEIGHT as f64 - 1.0),
-                    KeyCode::Right => app.x = (app.x + 1.0).clamp(0.0, WIDTH as f64 - 1.0),
-                    KeyCode::Left => app.x = (app.x - 1.0).clamp(0.0, WIDTH as f64 - 1.0),
+                    KeyCode::Up => state.onUp(),
+                    KeyCode::Down => state.onDown(),
+                    KeyCode::Right => state.onRight(),
+                    KeyCode::Left => state.onLeft(),
                     KeyCode::Char(' ') => {
-                        if let Tile::Thing(plant) = app.board.next {
-                            app.board.place_plant(app.x as usize, app.y as usize, plant);
-                            app.board.update_board((app.x as usize, app.y as usize));
-                            app.state = State::Choosing(0);
-                        }
+                        state.onSpace(&mut app.game)
                     }
                     _ => {}
                 },
@@ -184,14 +253,14 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
     }
 }
 fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
-    match app.state {
-        State::Choosing(index) => {
+    match app.game.state {
+        State::Choosing(state) => {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .margin(5)
                 .constraints([Constraint::Percentage(100)].as_ref())
                 .split(f.size());
-            let titles = PLANTS
+            let titles = START_PLANTS
                 .iter()
                 .map(|t| {
                     Spans::from(vec![Span::styled(
@@ -202,7 +271,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
                 .collect();
             let tabs = Tabs::new(titles)
                 .block(Block::default().borders(Borders::ALL).title("Plants"))
-                .select(index)
+                .select(state.index)
                 .style(Style::default().fg(Color::Cyan))
                 .highlight_style(
                     Style::default()
@@ -213,15 +282,15 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
 
             f.render_widget(tabs, chunks[0]);
         }
-        State::Placing => {
+        State::Placing(state) => {
             let rects = Layout::default()
                 .constraints([Constraint::Percentage(100)].as_ref())
                 .margin(1)
                 .split(f.size());
 
             let title = format!(
-                " BOARD // SCORE: {} // ROUND: {} ",
-                app.board.points, app.board.round
+                " game // SCORE: {} // ROUND: {} ",
+                app.game.points, app.game.round
             );
             let canvas = Canvas::default()
                 .block(Block::default().borders(Borders::ALL).title(title))
@@ -246,7 +315,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
                                 color,
                             };
 
-                            let tile = &app.board.tile[idx];
+                            let tile = &app.game.tile[idx];
                             let t_c = if let Tile::Thing(p) = tile {
                                 if p.max_age - p.age < 3 {
                                     Color::Magenta
