@@ -1,0 +1,23 @@
+[
+    {
+        "max_age": 2,
+        "age": 0,
+        "points": 0,
+        "name": "Grass",
+        "short_display": "w"
+    },
+    {
+        "max_age": 4,
+        "age": 0,
+        "points": 2,
+        "name": "Tall grass",
+        "short_display": "W"
+    },
+    {
+        "max_age": 7,
+        "age": 0,
+        "points": 4,
+        "name": "Shrub",
+        "short_display": "Y"
+    }
+]

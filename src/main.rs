@@ -3,11 +3,12 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use serde::{Deserialize, Serialize};
 
 use std::{
     error::Error,
     fmt::{Debug, Display, Write},
-    io::{self},
+    io::{self}, fs, borrow::Cow,
 };
 use tui::{
     backend::{Backend, CrosstermBackend},
@@ -29,19 +30,29 @@ enum State {
     Placing,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ChoosingState {
-    index: usize,
-    _choice: [Plant; 3],
+    index: Option<usize>,
+    choice: Option<Plant>,
 }
 
 impl ChoosingState {
     fn on_down(&mut self, len: usize) {
-        self.index = (self.index + 1).rem_euclid(len);
+        match self.index {
+            Some(index) => {
+                self.index = Some((index + 1).rem_euclid(len));
+            },
+            None => todo!(),
+        }
     }
 
     fn on_up(&mut self, len: usize) {
-        self.index = (self.index as i32 - 1).rem_euclid(len as i32) as usize;
+        match self.index {
+            Some(index) => {
+                self.index = Some((index as i32 - 1).rem_euclid(len as i32) as usize);
+            },
+            None => todo!(),
+        }
     }
 
     fn _on_space(&mut self, game: &mut Game) {}
@@ -50,8 +61,8 @@ impl ChoosingState {
 impl Default for ChoosingState {
     fn default() -> Self {
         Self {
-            index: Default::default(),
-            _choice: START_PLANTS,
+            index: Some(0),
+            choice: None,
         }
     }
 }
@@ -94,7 +105,8 @@ impl Default for PlacingState {
 struct Game {
     state: State,
     tile: Vec<Tile>,
-    available: Vec<Plant>,
+    hand: Vec<Plant>,
+    all_plants: Vec<Plant>,
     points: u32,
     round: u32,
     placing: PlacingState,
@@ -103,12 +115,15 @@ struct Game {
 
 impl Game {
     fn empty() -> Game {
+
+        let all_plants: Vec<Plant> = ALL_PLANTS.into_iter().collect::<Vec<Plant>>();
         Game {
             state: State::Choosing,
             tile: (0..(WIDTH * HEIGHT))
                 .map(|_| Tile::Empty)
                 .collect::<Vec<Tile>>(),
-            available: START_PLANTS.into_iter().collect(),
+            hand: vec![all_plants[0].clone()],
+            all_plants,
             points: 0,
             round: 0,
             placing: PlacingState::default(),
@@ -116,29 +131,42 @@ impl Game {
         }
     }
 
-    fn selected_plant(&self) -> Plant {
-        self.available[self.choosing.index]
+    fn selected_plant(&self) -> Option<Plant> {
+        self.choosing.index.map(|idx| self.hand[idx].clone())
     }
 
     fn on_space(&mut self) {
+        if self.hand.len() == 0 {
+            self.update_game((100, 100));
+            return
+        }
+
         match self.state {
             State::Choosing => {
+                self.choosing.choice = self.choosing.index.map(|idx| self.hand[idx].clone());
                 self.state = State::Placing;
             }
             State::Placing => {
-                self.place_plant(
-                    self.placing.x as usize,
-                    self.placing.y as usize,
-                    START_PLANTS[self.choosing.index],
-                );
-                self.update_game((self.placing.x as usize, self.placing.y as usize));
-                self.state = State::Choosing;
+                if let Some(plant) = self.choosing.choice.take() {
+                    self.place_plant(
+                        self.placing.x as usize,
+                        self.placing.y as usize,
+                        &plant,
+                    );
+                    if let Some(idx) = self.choosing.index.take() {
+                        self.hand.remove(idx);
+                        self.update_game((self.placing.x as usize, self.placing.y as usize));
+                        self.state = State::Choosing;
+                    }
+                } else {
+                    // TODO what is this case even? maybe when we switch back to the board during choosing?
+                }
             }
         }
     }
 
-    fn place_plant(&mut self, x: usize, y: usize, plant: Plant) {
-        self.tile[xy_idx(x, y)] = Tile::Thing(plant);
+    fn place_plant(&mut self, x: usize, y: usize, plant: &Plant) {
+        self.tile[xy_idx(x, y)] = Tile::Thing(plant.clone());
     }
 
     fn update_game(&mut self, (new_x, new_y): (usize, usize)) {
@@ -158,18 +186,20 @@ impl Game {
             }
         }
         if self.round == 10 {
-            self.available.push(Plant {
+            self.hand.push(Plant {
                 max_age: 10,
                 age: 0,
                 points: 10,
-                display: 'o',
+                name: Cow::Borrowed("Bush"),
+                short_display: 'o',
             });
         } else if self.round == 15 {
-            self.available.push(Plant {
+            self.hand.push(Plant {
                 max_age: 20,
                 age: 0,
                 points: 40,
-                display: 'T',
+                name: Cow::Borrowed("Tree"),
+                short_display: 'T',
             });
         }
         self.round += 1;
@@ -191,8 +221,8 @@ impl App {
         }
     }
 
-    fn select(&mut self, index: usize) {
-        self.list_state.select(Some(index));
+    fn select(&mut self, index: Option<usize>) {
+        self.list_state.select(index);
     }
 
     fn unselect(&mut self) {
@@ -200,39 +230,50 @@ impl App {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Plant {
     max_age: u32,
     age: u32,
     points: u32,
-    display: char,
+    name: Cow<'static, str>,
+    short_display: char,
 }
 
 impl Display for Plant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let tile_info = format!("{}: {}/{}", self.display, self.age, self.max_age);
+        let tile_info = format!("{}: {}/{}", self.short_display.to_string(), self.age, self.max_age);
         f.write_str(&tile_info)
     }
 }
 
-const START_PLANTS: [Plant; 3] = [
+fn load_plants() -> Vec<Plant> {
+    let contents = fs::read_to_string("assets/plants.json").unwrap();
+    let plants: Vec<Plant> = serde_json::from_str(&contents).unwrap();
+
+    plants
+}
+
+const ALL_PLANTS: [Plant; 3] = [
     Plant {
-        max_age: 1,
+        max_age: 2,
         age: 0,
         points: 0,
-        display: 'w',
+        name: Cow::Borrowed("Grass"),
+        short_display: 'w',
     },
     Plant {
         max_age: 4,
         age: 0,
         points: 2,
-        display: 'F',
+        name: Cow::Borrowed("Tall grass"),
+        short_display: 'W',
     },
     Plant {
         max_age: 7,
         age: 0,
         points: 4,
-        display: 'Y',
+        name: Cow::Borrowed("Shrub"),
+        short_display: 'Y',
     },
 ];
 
@@ -263,11 +304,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                 State::Choosing => match key.code {
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Down => {
-                        app.game.choosing.on_down(app.game.available.len());
+                        app.game.choosing.on_down(app.game.hand.len());
                         app.select(app.game.choosing.index);
                     }
                     KeyCode::Up => {
-                        app.game.choosing.on_up(app.game.available.len());
+                        app.game.choosing.on_up(app.game.hand.len());
                         app.select(app.game.choosing.index);
                     }
                     KeyCode::Char(' ') => {
@@ -387,10 +428,10 @@ where
 {
     let items: Vec<ListItem> = app
         .game
-        .available
+        .hand
         .iter()
         .map(|i| {
-            let lines = vec![Spans::from(i.display.to_string())];
+            let lines = vec![Spans::from(i.name.as_ref())];
 
             ListItem::new(lines).style(Style::default())
         })
@@ -421,19 +462,19 @@ where
     B: Backend,
 {
     let plant_opt = match app.game.state {
-        State::Choosing => Some(app.game.selected_plant()),
+        State::Choosing => app.game.selected_plant(),
         State::Placing => {
             let idx = xy_idx(app.game.placing.x, app.game.placing.y);
             let tile = &app.game.tile[idx];
             match tile {
                 Tile::Empty => None,
-                Tile::Thing(plant) => Some(*plant),
+                Tile::Thing(plant) => Some(plant.clone()),
             }
         }
     };
 
-    let text = match plant_opt {
-        Some(plant) => {
+    let content = match plant_opt {
+        Some(ref plant) => {
             vec![
                 Spans::from("Plant:"),
                 Spans::from(""),
@@ -447,17 +488,25 @@ where
             vec![Spans::from("Empty")]
         }
     };
+
+    let title = match plant_opt {
+        Some(ref plant) => format!(" {} ", plant.name),
+        None => "".into(),
+    };
+
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
-        "Info",
+        title,
         Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD),
     ));
-    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
+    let paragraph = Paragraph::new(content).block(block).wrap(Wrap { trim: true });
     f.render_widget(paragraph, area);
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
