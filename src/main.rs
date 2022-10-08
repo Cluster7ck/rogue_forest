@@ -1,14 +1,19 @@
+use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 
 use std::{
+    borrow::{Cow, Borrow},
+    collections::HashMap,
     error::Error,
     fmt::{Debug, Display, Write},
-    io::{self}, fs, borrow::Cow,
+    fs,
+    io::{self},
 };
 use tui::{
     backend::{Backend, CrosstermBackend},
@@ -22,8 +27,42 @@ use tui::{
     Frame, Terminal,
 };
 
-const WIDTH: usize = 6;
-const HEIGHT: usize = 6;
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, default_value_t = 6)]
+    dim: usize,
+}
+
+#[derive(Debug)]
+pub struct GlobalSetting {
+    width: usize,
+    height: usize,
+}
+
+static INSTANCE: OnceCell<GlobalSetting> = OnceCell::new();
+
+impl GlobalSetting {
+    pub fn global() -> &'static GlobalSetting {
+        INSTANCE.get().expect("logger is not initialized")
+    }
+
+    fn load() -> Result<GlobalSetting, std::io::Error> {
+        let args = Args::parse();
+        Ok(GlobalSetting {
+            width: args.dim,
+            height: args.dim,
+        })
+    }
+}
+
+fn height() -> usize {
+    INSTANCE.get().unwrap().height
+}
+
+fn width() -> usize {
+    INSTANCE.get().unwrap().width
+}
 
 enum State {
     Choosing,
@@ -38,20 +77,26 @@ struct ChoosingState {
 
 impl ChoosingState {
     fn on_down(&mut self, len: usize) {
+        if len == 0 {
+            return
+        }
         match self.index {
             Some(index) => {
                 self.index = Some((index + 1).rem_euclid(len));
-            },
-            None => todo!(),
+            }
+            None => self.index = Some(0),
         }
     }
 
     fn on_up(&mut self, len: usize) {
+        if len == 0 {
+            return
+        }
         match self.index {
             Some(index) => {
                 self.index = Some((index as i32 - 1).rem_euclid(len as i32) as usize);
-            },
-            None => todo!(),
+            }
+            None => self.index = Some(0),
         }
     }
 
@@ -75,19 +120,19 @@ struct PlacingState {
 
 impl PlacingState {
     fn on_up(&mut self) {
-        self.y = (self.y + 1).clamp(0, HEIGHT - 1);
+        self.y = (self.y + 1).clamp(0, height() - 1);
     }
 
     fn on_down(&mut self) {
-        self.y = (self.y - 1).clamp(0, HEIGHT - 1);
+        self.y = (self.y - 1).clamp(0, height() - 1);
     }
 
     fn on_right(&mut self) {
-        self.x = (self.x + 1).clamp(0, WIDTH - 1);
+        self.x = (self.x + 1).clamp(0, width() - 1);
     }
 
     fn on_left(&mut self) {
-        self.x = (self.x - 1).clamp(0, WIDTH - 1);
+        self.x = (self.x - 1).clamp(0, width() - 1);
     }
 
     fn _on_space(self) {}
@@ -96,8 +141,8 @@ impl PlacingState {
 impl Default for PlacingState {
     fn default() -> Self {
         Self {
-            x: (WIDTH as f64 / 2.0).round() as usize,
-            y: (HEIGHT as f64 / 2.0).round() as usize,
+            x: (width() as f64 / 2.0).round() as usize,
+            y: (height() as f64 / 2.0).round() as usize,
         }
     }
 }
@@ -107,6 +152,7 @@ struct Game {
     tile: Vec<Tile>,
     hand: Vec<Plant>,
     all_plants: Vec<Plant>,
+    name_to_plant: HashMap<String, Plant>,
     points: u32,
     round: u32,
     placing: PlacingState,
@@ -115,15 +161,70 @@ struct Game {
 
 impl Game {
     fn empty() -> Game {
+        let all_plants = [
+            Plant {
+                max_age: 2,
+                age: 0,
+                points: 0,
+                name: Cow::Borrowed("Grass"),
+                short_display: 'w',
+                drops: vec![
+                    Drop {
+                        chance: 5.0,
+                        plants: vec!["Grass".into(), "Grass".into()],
+                    },
+                    Drop {
+                        chance: 1.0,
+                        plants: vec!["Grass".into(), "Tall Grass".into()],
+                    },
+                ],
+            },
+            Plant {
+                max_age: 4,
+                age: 0,
+                points: 2,
+                name: Cow::Borrowed("Tall Grass"),
+                short_display: 'W',
+                drops: vec![
+                    Drop {
+                        chance: 5.0,
+                        plants: vec!["Tall Grass".into(), "Tall Grass".into()],
+                    },
+                    Drop {
+                        chance: 1.0,
+                        plants: vec!["Tall".into(), "Shrub".into()],
+                    },
+                ],
+            },
+            Plant {
+                max_age: 7,
+                age: 0,
+                points: 4,
+                name: Cow::Borrowed("Shrub"),
+                short_display: 'Y',
+                drops: vec![Drop {
+                    chance: 5.0,
+                    plants: vec!["Shrub".into(), "Shrub".into()],
+                }],
+            },
+        ];
 
-        let all_plants: Vec<Plant> = ALL_PLANTS.into_iter().collect::<Vec<Plant>>();
+        let all_plants: Vec<Plant> = all_plants.into_iter().collect::<Vec<Plant>>();
+        let name_to_plant: HashMap<String, Plant> = all_plants
+            .iter()
+            .map(|p| (<Cow<'_, str> as Borrow<str>>::borrow(&p.name).to_string(), p.clone()))
+            .collect::<HashMap<String, Plant>>();
+        let hand_plant = all_plants[0].clone();
+        let hand = vec![hand_plant.clone(), hand_plant];
+
         Game {
             state: State::Choosing,
-            tile: (0..(WIDTH * HEIGHT))
+            tile: (0..(width() * height()))
                 .map(|_| Tile::Empty)
                 .collect::<Vec<Tile>>(),
-            hand: vec![all_plants[0].clone()],
+            hand,
             all_plants,
+            name_to_plant,
             points: 0,
             round: 0,
             placing: PlacingState::default(),
@@ -132,13 +233,17 @@ impl Game {
     }
 
     fn selected_plant(&self) -> Option<Plant> {
-        self.choosing.index.map(|idx| self.hand[idx].clone())
+        if self.hand.len() == 0 {
+            None
+        } else {
+            self.choosing.index.map(|idx| self.hand[idx].clone())
+        }
     }
 
     fn on_space(&mut self) {
         if self.hand.len() == 0 {
             self.update_game((100, 100));
-            return
+            return;
         }
 
         match self.state {
@@ -148,14 +253,11 @@ impl Game {
             }
             State::Placing => {
                 if let Some(plant) = self.choosing.choice.take() {
-                    self.place_plant(
-                        self.placing.x as usize,
-                        self.placing.y as usize,
-                        &plant,
-                    );
+                    self.place_plant(self.placing.x as usize, self.placing.y as usize, &plant);
                     if let Some(idx) = self.choosing.index.take() {
                         self.hand.remove(idx);
                         self.update_game((self.placing.x as usize, self.placing.y as usize));
+                        self.choosing.index = if idx > 0 { Some(idx - 1) } else { Some(idx) };
                         self.state = State::Choosing;
                     }
                 } else {
@@ -170,8 +272,8 @@ impl Game {
     }
 
     fn update_game(&mut self, (new_x, new_y): (usize, usize)) {
-        for y in 0..HEIGHT {
-            for x in 0..WIDTH {
+        for y in 0..height() {
+            for x in 0..width() {
                 if x == new_x && y == new_y {
                     continue;
                 }
@@ -180,27 +282,17 @@ impl Game {
                     p.age += 1;
                     if p.age >= p.max_age {
                         self.points += p.points;
+                        if let Some(drop) = p.drops.get(0) {
+                            for plant_name in drop.plants.iter() {
+                                if let Some(dropped_plant) = self.name_to_plant.get(plant_name) {
+                                    self.hand.push(dropped_plant.clone())
+                                }
+                            }
+                        }
                         self.tile[idx] = Tile::Empty;
                     }
                 }
             }
-        }
-        if self.round == 10 {
-            self.hand.push(Plant {
-                max_age: 10,
-                age: 0,
-                points: 10,
-                name: Cow::Borrowed("Bush"),
-                short_display: 'o',
-            });
-        } else if self.round == 15 {
-            self.hand.push(Plant {
-                max_age: 20,
-                age: 0,
-                points: 40,
-                name: Cow::Borrowed("Tree"),
-                short_display: 'T',
-            });
         }
         self.round += 1;
     }
@@ -237,11 +329,23 @@ struct Plant {
     points: u32,
     name: Cow<'static, str>,
     short_display: char,
+    drops: Vec<Drop>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Drop {
+    chance: f32,
+    plants: Vec<String>,
 }
 
 impl Display for Plant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let tile_info = format!("{}: {}/{}", self.short_display.to_string(), self.age, self.max_age);
+        let tile_info = format!(
+            "{}: {}/{}",
+            self.short_display.to_string(),
+            self.age,
+            self.max_age
+        );
         f.write_str(&tile_info)
     }
 }
@@ -252,30 +356,6 @@ fn load_plants() -> Vec<Plant> {
 
     plants
 }
-
-const ALL_PLANTS: [Plant; 3] = [
-    Plant {
-        max_age: 2,
-        age: 0,
-        points: 0,
-        name: Cow::Borrowed("Grass"),
-        short_display: 'w',
-    },
-    Plant {
-        max_age: 4,
-        age: 0,
-        points: 2,
-        name: Cow::Borrowed("Tall grass"),
-        short_display: 'W',
-    },
-    Plant {
-        max_age: 7,
-        age: 0,
-        points: 4,
-        name: Cow::Borrowed("Shrub"),
-        short_display: 'Y',
-    },
-];
 
 enum Tile {
     Empty,
@@ -292,7 +372,7 @@ impl Display for Tile {
 }
 
 fn xy_idx(x: usize, y: usize) -> usize {
-    y * WIDTH + x
+    y * width() + x
 }
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
@@ -324,8 +404,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                     KeyCode::Right => app.game.placing.on_right(),
                     KeyCode::Left => app.game.placing.on_left(),
                     KeyCode::Char(' ') => {
-                        app.select(app.game.choosing.index);
                         app.game.on_space();
+                        app.select(app.game.choosing.index);
                     }
                     _ => {}
                 },
@@ -365,8 +445,8 @@ where
         .paint(|ctx| {
             let r_width = 0.7;
             let r_height = 0.7;
-            for x in 0..WIDTH {
-                for y in 0..HEIGHT {
+            for x in 0..width() {
+                for y in 0..height() {
                     let color = match app.game.state {
                         State::Choosing => Color::White,
                         State::Placing => match (x, y) {
@@ -406,8 +486,8 @@ where
                 }
             }
         })
-        .x_bounds([0.0, WIDTH as f64])
-        .y_bounds([0.0, HEIGHT as f64]);
+        .x_bounds([0.0, width() as f64])
+        .y_bounds([0.0, height() as f64]);
     f.render_widget(canvas, area)
 }
 
@@ -500,12 +580,17 @@ where
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD),
     ));
-    let paragraph = Paragraph::new(content).block(block).wrap(Wrap { trim: true });
+    let paragraph = Paragraph::new(content)
+        .block(block)
+        .wrap(Wrap { trim: true });
     f.render_widget(paragraph, area);
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-
+    {
+        let settings = GlobalSetting::load().unwrap();
+        INSTANCE.set(settings).unwrap();
+    }
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
