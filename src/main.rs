@@ -8,7 +8,7 @@ use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 
 use std::{
-    borrow::{Cow, Borrow},
+    borrow::{Borrow, Cow},
     collections::HashMap,
     error::Error,
     fmt::{Debug, Display, Write},
@@ -40,6 +40,10 @@ pub struct GlobalSetting {
     height: usize,
 }
 
+const BG: Color = Color::Rgb(51, 51, 51);
+const ACTIVE: Color = Color::Green;
+const INACTIVE: Color = Color::LightGreen;
+
 static INSTANCE: OnceCell<GlobalSetting> = OnceCell::new();
 
 impl GlobalSetting {
@@ -64,9 +68,11 @@ fn width() -> usize {
     INSTANCE.get().unwrap().width
 }
 
+#[derive(PartialEq)]
 enum State {
     Choosing,
     Placing,
+    NextRound,
 }
 
 #[derive(Debug, Clone)]
@@ -78,7 +84,7 @@ struct ChoosingState {
 impl ChoosingState {
     fn on_down(&mut self, len: usize) {
         if len == 0 {
-            return
+            return;
         }
         match self.index {
             Some(index) => {
@@ -90,7 +96,7 @@ impl ChoosingState {
 
     fn on_up(&mut self, len: usize) {
         if len == 0 {
-            return
+            return;
         }
         match self.index {
             Some(index) => {
@@ -124,7 +130,7 @@ impl PlacingState {
     }
 
     fn on_down(&mut self) {
-        self.y = (self.y - 1).clamp(0, height() - 1);
+        self.y = (self.y as i64 - 1).clamp(0, height() as i64 - 1) as usize;
     }
 
     fn on_right(&mut self) {
@@ -132,7 +138,7 @@ impl PlacingState {
     }
 
     fn on_left(&mut self) {
-        self.x = (self.x - 1).clamp(0, width() - 1);
+        self.x = (self.x as i64 - 1).clamp(0, width() as i64 - 1) as usize;
     }
 
     fn _on_space(self) {}
@@ -153,7 +159,7 @@ struct Game {
     hand: Vec<Plant>,
     all_plants: Vec<Plant>,
     name_to_plant: HashMap<String, Plant>,
-    points: u32,
+    points: f32,
     round: u32,
     placing: PlacingState,
     choosing: ChoosingState,
@@ -165,12 +171,15 @@ impl Game {
             Plant {
                 max_age: 2,
                 age: 0,
-                points: 0,
+                size_per_turn: 1,
+                size: 0,
+                points_per_size: 1.0,
+                class: 's',
                 name: Cow::Borrowed("Grass"),
                 short_display: 'w',
                 drops: vec![
                     Drop {
-                        chance: 5.0,
+                        chance: 1.0,
                         plants: vec!["Grass".into(), "Grass".into()],
                     },
                     Drop {
@@ -182,7 +191,10 @@ impl Game {
             Plant {
                 max_age: 4,
                 age: 0,
-                points: 2,
+                size_per_turn: 1,
+                size: 0,
+                points_per_size: 1.0,
+                class: 's',
                 name: Cow::Borrowed("Tall Grass"),
                 short_display: 'W',
                 drops: vec![
@@ -192,14 +204,17 @@ impl Game {
                     },
                     Drop {
                         chance: 1.0,
-                        plants: vec!["Tall".into(), "Shrub".into()],
+                        plants: vec!["Tall Grass".into(), "Shrub".into()],
                     },
                 ],
             },
             Plant {
                 max_age: 7,
                 age: 0,
-                points: 4,
+                size_per_turn: 1,
+                size: 0,
+                points_per_size: 1.0,
+                class: 'S',
                 name: Cow::Borrowed("Shrub"),
                 short_display: 'Y',
                 drops: vec![Drop {
@@ -212,7 +227,12 @@ impl Game {
         let all_plants: Vec<Plant> = all_plants.into_iter().collect::<Vec<Plant>>();
         let name_to_plant: HashMap<String, Plant> = all_plants
             .iter()
-            .map(|p| (<Cow<'_, str> as Borrow<str>>::borrow(&p.name).to_string(), p.clone()))
+            .map(|p| {
+                (
+                    <Cow<'_, str> as Borrow<str>>::borrow(&p.name).to_string(),
+                    p.clone(),
+                )
+            })
             .collect::<HashMap<String, Plant>>();
         let hand_plant = all_plants[0].clone();
         let hand = vec![hand_plant.clone(), hand_plant];
@@ -225,7 +245,7 @@ impl Game {
             hand,
             all_plants,
             name_to_plant,
-            points: 0,
+            points: 0.0,
             round: 0,
             placing: PlacingState::default(),
             choosing: ChoosingState::default(),
@@ -242,7 +262,7 @@ impl Game {
 
     fn on_space(&mut self) {
         if self.hand.len() == 0 {
-            self.update_game((100, 100));
+            //self.update_game();
             return;
         }
 
@@ -252,49 +272,129 @@ impl Game {
                 self.state = State::Placing;
             }
             State::Placing => {
-                if let Some(plant) = self.choosing.choice.take() {
-                    self.place_plant(self.placing.x as usize, self.placing.y as usize, &plant);
-                    if let Some(idx) = self.choosing.index.take() {
-                        self.hand.remove(idx);
-                        self.update_game((self.placing.x as usize, self.placing.y as usize));
-                        self.choosing.index = if idx > 0 { Some(idx - 1) } else { Some(idx) };
-                        self.state = State::Choosing;
+                if self.can_place_plant(self.placing.x, self.placing.y) {
+                    if let Some(plant) = self.choosing.choice.take() {
+                        self.place_plant(self.placing.x, self.placing.y, &plant);
+                        if let Some(idx) = self.choosing.index.take() {
+                            self.hand.remove(idx);
+                            self.choosing.index = if idx > 0 { Some(idx - 1) } else { Some(idx) };
+                            self.state = State::Choosing;
+                        }
+                    } else {
+                        // TODO what is this case even? maybe when we switch back to the board during choosing?
                     }
-                } else {
-                    // TODO what is this case even? maybe when we switch back to the board during choosing?
                 }
+            }
+            State::NextRound => self.next_round(),
+        }
+    }
+
+    fn on_tab(&mut self) {
+        match self.state {
+            State::Choosing => {
+                self.state = State::NextRound;
+            }
+            State::Placing => {
+                self.state = State::Choosing;
+            }
+            State::NextRound => {
+                self.state = State::Placing;
             }
         }
     }
 
-    fn place_plant(&mut self, x: usize, y: usize, plant: &Plant) {
-        self.tile[xy_idx(x, y)] = Tile::Thing(plant.clone());
+    fn next_round(&mut self) {
+        self.update_game();
     }
 
-    fn update_game(&mut self, (new_x, new_y): (usize, usize)) {
+    fn place_plant(&mut self, x: usize, y: usize, plant: &Plant) {
+        self.tile[xy_idx(x, y)] = Tile::New(plant.clone());
+    }
+
+    fn can_place_plant(&self, x: usize, y: usize) -> bool {
+        let tile = &self.tile[xy_idx(x, y)];
+        if let Tile::Empty = tile {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn on_delete(&mut self) {
+        let mut should_remove = false;
+
+        if let Tile::New(ref plant) = self.tile[xy_idx(self.placing.x, self.placing.y)] {
+            self.hand.push(plant.clone());
+            should_remove = true;
+            self.tile[xy_idx(self.placing.x, self.placing.y)] = Tile::Empty;
+        }
+
+        if should_remove {
+            let plant = take(&mut self.tile, xy_idx(self.placing.x, self.placing.y));
+            //self.tile[xy_idx(self.placing.x, self.placing.y)] = Tile::Empty;
+        }
+    }
+
+    fn update_game(&mut self) {
         for y in 0..height() {
             for x in 0..width() {
-                if x == new_x && y == new_y {
-                    continue;
-                }
                 let idx = xy_idx(x, y);
-                if let Tile::Thing(p) = &mut self.tile[idx] {
+
+                if let Tile::New(p) = &mut self.tile[idx] {
+                    self.tile[idx] = Tile::Permanent(p.clone())
+                }
+
+                if let Tile::Permanent(p) = &mut self.tile[idx] {
                     p.age += 1;
+                    p.size += p.size_per_turn;
                     if p.age >= p.max_age {
-                        self.points += p.points;
-                        if let Some(drop) = p.drops.get(0) {
-                            for plant_name in drop.plants.iter() {
-                                if let Some(dropped_plant) = self.name_to_plant.get(plant_name) {
-                                    self.hand.push(dropped_plant.clone())
-                                }
-                            }
+                        let inc = p.size as f32 * p.points_per_size;
+                        self.points += inc;
+                        if let Some(mut drops) = get_drops(p, &self.name_to_plant) {
+                            self.hand.append(&mut drops)
                         }
                         self.tile[idx] = Tile::Empty;
                     }
                 }
+
             }
         }
         self.round += 1;
+    }
+}
+
+fn get_drops(plant: &Plant, name_to_plant: &HashMap<String, Plant>) -> Option<Vec<Plant>> {
+    let sum = plant.drops.iter().map(|p| p.chance).sum::<f32>();
+    let rnd = rand::random::<f32>() * sum;
+
+    let mut running = 0.0;
+    for d in plant.drops.iter() {
+        let cur = running + d.chance;
+        if rnd > running && rnd <= cur {
+            let plants = d
+                .plants
+                .iter()
+                .flat_map(|plant_name| {
+                    let pasdj = name_to_plant.get(plant_name);
+                    if let None = pasdj {
+                        panic!("Expected Plant <{}> to exist", plant_name)
+                    }
+                    pasdj
+                })
+                .map(|p| p.clone())
+                .collect::<Vec<Plant>>();
+            return Some(plants);
+        }
+        running += d.chance;
+    }
+    return None;
+}
+
+fn take<T>(vec: &mut Vec<T>, index: usize) -> Option<T> {
+    if vec.get(index).is_none() {
+        None
+    } else {
+        Some(vec.swap_remove(index))
     }
 }
 
@@ -326,7 +426,10 @@ impl App {
 struct Plant {
     max_age: u32,
     age: u32,
-    points: u32,
+    size_per_turn: u32,
+    size: u32,
+    points_per_size: f32,
+    class: char,
     name: Cow<'static, str>,
     short_display: char,
     drops: Vec<Drop>,
@@ -359,14 +462,16 @@ fn load_plants() -> Vec<Plant> {
 
 enum Tile {
     Empty,
-    Thing(Plant),
+    New(Plant),
+    Permanent(Plant),
 }
 
 impl Display for Tile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Tile::Empty => f.write_char(' '),
-            Tile::Thing(x) => f.write_str(&x.to_string()),
+            Tile::New(x) => f.write_str(&x.to_string()),
+            Tile::Permanent(x) => f.write_str(&x.to_string()),
         }
     }
 }
@@ -380,9 +485,19 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
         terminal.draw(|f| ui(f, &mut app))?;
 
         if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Esc => return Ok(()),
+                KeyCode::Tab => {
+                    app.game.on_tab();
+                }
+                KeyCode::Enter => {
+                    app.game.next_round();
+                }
+                _ => {}
+            }
+
             match app.game.state {
                 State::Choosing => match key.code {
-                    KeyCode::Char('q') => return Ok(()),
                     KeyCode::Down => {
                         app.game.choosing.on_down(app.game.hand.len());
                         app.select(app.game.choosing.index);
@@ -398,14 +513,24 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                     _ => {}
                 },
                 State::Placing => match key.code {
-                    KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('q') => app.game.on_delete(),
                     KeyCode::Up => app.game.placing.on_up(),
+                    KeyCode::Char('w') => app.game.placing.on_up(),
                     KeyCode::Down => app.game.placing.on_down(),
+                    KeyCode::Char('s') => app.game.placing.on_down(),
                     KeyCode::Right => app.game.placing.on_right(),
+                    KeyCode::Char('d') => app.game.placing.on_right(),
                     KeyCode::Left => app.game.placing.on_left(),
+                    KeyCode::Char('a') => app.game.placing.on_left(),
                     KeyCode::Char(' ') => {
                         app.game.on_space();
                         app.select(app.game.choosing.index);
+                    }
+                    _ => {}
+                },
+                State::NextRound => match key.code {
+                    KeyCode::Char(' ') => {
+                        app.game.on_space();
                     }
                     _ => {}
                 },
@@ -433,14 +558,22 @@ where
         " Forest // Score: {} // Round: {} ",
         app.game.points, app.game.round
     );
+
+    let selected_color = if app.game.state == State::Placing {
+        ACTIVE
+    } else {
+        INACTIVE
+    };
+
     let canvas = Canvas::default()
         .block(
-            Block::default().borders(Borders::ALL).title(Span::styled(
-                title,
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(selected_color))
+                .title(Span::styled(
+                    title,
+                    Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
+                )),
         )
         .paint(|ctx| {
             let r_width = 0.7;
@@ -448,13 +581,14 @@ where
             for x in 0..width() {
                 for y in 0..height() {
                     let color = match app.game.state {
-                        State::Choosing => Color::White,
+                        State::Choosing => INACTIVE,
                         State::Placing => match (x, y) {
                             (x_, y_) if x_ == app.game.placing.x && y_ == app.game.placing.y => {
-                                Color::Green
+                                ACTIVE
                             }
-                            (_, _) => Color::White,
+                            (_, _) => INACTIVE,
                         },
+                        State::NextRound => INACTIVE,
                     };
 
                     let idx = xy_idx(x, y);
@@ -469,17 +603,19 @@ where
                     };
 
                     let tile = &app.game.tile[idx];
-                    let t_c = if let Tile::Thing(p) = tile {
+                    let tile_text_color = if let Tile::Permanent(p) = tile {
                         if p.max_age - p.age < 3 {
                             Color::Magenta
                         } else {
-                            Color::White
+                            INACTIVE
                         }
+                    } else if let Tile::New(_) = tile {
+                        Color::Yellow
                     } else {
-                        Color::White
+                        INACTIVE
                     };
                     let _debug = format!("({},{}): {}", x, y, tile,);
-                    let s = Span::styled(tile.to_string(), Style::default().fg(t_c));
+                    let s = Span::styled(tile.to_string(), Style::default().fg(tile_text_color));
                     ctx.layer();
                     ctx.print(x_off + r_width / 4.0, y_off + r_height / 2.0, s);
                     ctx.draw(&rect);
@@ -496,10 +632,18 @@ where
     B: Backend,
 {
     let chunks = Layout::default()
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
+        .constraints(
+            [
+                Constraint::Percentage(60),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+            ]
+            .as_ref(),
+        )
         .split(area);
     draw_card_chooser(f, app, chunks[0]);
     draw_card_info(f, app, chunks[1]);
+    draw_next_round(f, app, chunks[2]);
 }
 
 fn draw_card_chooser<B>(f: &mut Frame<B>, app: &mut App, area: Rect)
@@ -516,14 +660,22 @@ where
             ListItem::new(lines).style(Style::default())
         })
         .collect();
+
+    let selected_color = if app.game.state == State::Choosing {
+        ACTIVE
+    } else {
+        INACTIVE
+    };
+
     let items = List::new(items)
         .block(
-            Block::default().borders(Borders::ALL).title(Span::styled(
-                "Plants",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(selected_color))
+                .title(Span::styled(
+                    " Plants ",
+                    Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
+                )),
         )
         .highlight_style(
             Style::default()
@@ -537,30 +689,62 @@ where
     f.render_stateful_widget(items, area, &mut app.list_state);
 }
 
+fn draw_next_round<B>(f: &mut Frame<B>, app: &mut App, area: Rect)
+where
+    B: Backend,
+{
+    let selected_color = if app.game.state == State::NextRound {
+        ACTIVE
+    } else {
+        INACTIVE
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(selected_color));
+    let paragraph = Paragraph::new("Next Round")
+        .block(block)
+        .wrap(Wrap { trim: true });
+    f.render_widget(paragraph, area);
+}
+
 fn draw_card_info<B>(f: &mut Frame<B>, app: &mut App, area: Rect)
 where
     B: Backend,
 {
     let plant_opt = match app.game.state {
         State::Choosing => app.game.selected_plant(),
+        State::NextRound => app.game.selected_plant(),
         State::Placing => {
             let idx = xy_idx(app.game.placing.x, app.game.placing.y);
             let tile = &app.game.tile[idx];
             match tile {
                 Tile::Empty => None,
-                Tile::Thing(plant) => Some(plant.clone()),
+                Tile::Permanent(plant) => Some(plant.clone()),
+                Tile::New(plant) => Some(plant.clone()),
             }
         }
     };
 
     let content = match plant_opt {
         Some(ref plant) => {
+            let proj_points = plant.max_age as f32 * plant.size_per_turn as f32 * plant.points_per_size;
             vec![
-                Spans::from("Plant:"),
-                Spans::from(""),
                 Spans::from(vec![
-                    Span::styled("Age: ", Style::default().fg(Color::Cyan)),
+                    Span::styled("Max Age: ", Style::default().fg(Color::Cyan)),
                     Span::raw(plant.max_age.to_string()),
+                ]),
+                Spans::from(vec![
+                    Span::styled("Size per Turn: ", Style::default().fg(Color::Cyan)),
+                    Span::raw(plant.size_per_turn.to_string()),
+                ]),
+                Spans::from(vec![
+                    Span::styled("Points per Size: ", Style::default().fg(Color::Cyan)),
+                    Span::raw(plant.points_per_size.to_string()),
+                ]),
+                Spans::from(vec![
+                    Span::styled("Points: ", Style::default().fg(Color::Cyan)),
+                    Span::raw(proj_points.to_string()),
                 ]),
             ]
         }
@@ -576,9 +760,7 @@ where
 
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
         title,
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD),
     ));
     let paragraph = Paragraph::new(content)
         .block(block)
